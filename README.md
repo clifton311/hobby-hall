@@ -1,24 +1,25 @@
 # Hobby Hall
 
-A community platform where creators share what they're making, learning, or growing — posts with photos, comments, likes, profiles, and category filters.
+A community platform where creators share what they're making, learning, or growing — real accounts, posts with photos, comments, likes, and profiles. Built with React + Vite + Supabase.
 
-## Run locally
+## 1. Run locally
 
 ```bash
 npm install
 npm run dev
 ```
 
-## Deploy online (free) + custom domain
+Without Supabase configured, the app runs in **demo mode** (data stays in your browser, name-only login). To go live for real users, do step 2.
 
-The easiest path is Vercel or Netlify:
+## 2. Connect Supabase (free) — makes it a real multi-user site
 
-1. Push this repo to GitHub (see below).
-2. Go to vercel.com (or netlify.com), sign in with GitHub, and click "New Project" → import this repo. It auto-detects Vite; just click Deploy.
-3. You'll get a live URL like `hobby-hall.vercel.app` immediately.
-4. Custom domain: buy one from any registrar (Namecheap, Cloudflare, Porkbun, ~$10/yr), then in your Vercel/Netlify project settings → Domains, add it and follow the DNS instructions (usually one A record or CNAME). HTTPS is automatic.
+1. Create a free project at [supabase.com](https://supabase.com).
+2. In the Supabase dashboard, open **SQL Editor**, paste the contents of `supabase/schema.sql`, and click **Run**. This creates the tables, security policies, and the photo storage bucket.
+3. (Recommended for a smooth start) In **Authentication → Providers → Email**, turn OFF "Confirm email" so users can sign up instantly. Turn it back on later for production hygiene.
+4. Copy `.env.example` to `.env` and fill in your **Project URL** and **anon public key** from **Project Settings → API**. The anon key is designed to be public — security is enforced by the row-level-security policies in the schema, not by hiding the key.
+5. Restart `npm run dev`. The demo banner disappears and you now have real email/password accounts and shared data.
 
-## Push to GitHub
+## 3. Push to GitHub
 
 ```bash
 # create an empty repo on github.com first, then:
@@ -27,15 +28,24 @@ git branch -M main
 git push -u origin main
 ```
 
-## Important: current data storage is per-browser
+Note: `.env` is gitignored on purpose — never commit it.
 
-Right now the app stores everything in each visitor's own browser (localStorage). The site works, but users won't see each other's posts. The demo login also has no passwords — anyone can use any name.
+## 4. Deploy + custom domain
 
-To make it a real multi-user community, add a backend. Recommended: **Supabase** (free tier):
+1. Sign into [vercel.com](https://vercel.com) with GitHub → New Project → import this repo → it auto-detects Vite.
+2. Before deploying, add two **Environment Variables** in the Vercel project settings: `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` (same values as your `.env`).
+3. Deploy. You get a live URL immediately.
+4. Custom domain: buy one at any registrar (~$10/yr), then Vercel → Settings → Domains → add it and follow the DNS instructions. HTTPS is automatic.
 
-1. Create a project at supabase.com.
-2. Use Supabase Auth for real sign-up/login with passwords.
-3. Create tables for posts, comments, likes, and profiles; use Supabase Storage for photos.
-4. Replace the adapter functions in `src/storage.js` (and the login logic in `src/App.jsx`) with Supabase client calls. The adapter is deliberately isolated so the UI code barely changes.
+## What's enforced server-side
 
-Also worth doing before a public launch: content moderation/reporting, rate limiting, and a privacy policy — anything with user-generated content and photos needs these.
+- Row-level security: users can only create/delete their own posts, comments, and likes; everything is publicly readable.
+- One like per user per post (database primary key).
+- Length limits on names, titles, bodies, and comments.
+- Photo uploads restricted to authenticated users, each in their own folder; images are compressed client-side (max 1200px JPEG) before upload.
+
+## Before a public launch, still consider
+
+- **Moderation**: a report button and an admin way to remove content (you can delete rows in the Supabase dashboard for now).
+- **Rate limiting**: Supabase has basic auth rate limits; consider limits on post/comment creation for spam.
+- **Legal pages**: privacy policy and terms of service — any site with user accounts and uploads needs them.

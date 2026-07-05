@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Heart, Plus, X, Compass, MessageCircle, ImageIcon, LogOut, User, ArrowLeft } from "lucide-react";
+import { api, usingSupabase } from "./api";
 
 const CATEGORIES = [
   { id: "fiber", label: "Fiber & Textile", emoji: "🧶", hue: "#B54A32" },
@@ -12,52 +13,7 @@ const CATEGORIES = [
   { id: "outdoor", label: "Outdoors", emoji: "⛰️", hue: "#5B7043" },
 ];
 
-const SEED = [
-  {
-    id: "seed_1", name: "Maya", category: "fiber",
-    title: "First hand-dyed skein with avocado pits",
-    body: "Saved pits and skins for a month — got this dusty pink on merino. The trick is a long, slow simmer and patience. Ask me anything about natural dyes!",
-    likes: 12, likedBy: [], image: null, ts: Date.now() - 86400000 * 2,
-    comments: [{ id: "c1", name: "Theo", text: "That color is gorgeous. How long did you simmer?", ts: Date.now() - 86400000 }],
-  },
-  {
-    id: "seed_2", name: "Theo", category: "wood",
-    title: "Dovetail practice box, attempt #4",
-    body: "Finally got gaps under half a millimeter. Sharp chisels changed everything — I was fighting dull tools for three attempts.",
-    likes: 8, likedBy: [], image: null, ts: Date.now() - 86400000, comments: [],
-  },
-  {
-    id: "seed_3", name: "Priya", category: "garden",
-    title: "Balcony tomatoes are officially out of control",
-    body: "Three plants in grow bags, and I'm harvesting a bowl a day. Happy to share my watering schedule for hot climates.",
-    likes: 15, likedBy: [], image: null, ts: Date.now() - 3600000 * 5,
-    comments: [{ id: "c2", name: "Maya", text: "Yes please, mine keep wilting by noon!", ts: Date.now() - 3600000 * 2 }],
-  },
-];
-
-const INDEX_KEY = "hobbyhall_index_v2";
-const POST_KEY = (id) => `hhpost:${id}`;
-const PROFILE_KEY = "hobbyhall_me_v1";
-const PROFILES_KEY = "hobbyhall_profiles_v1";
-
-const compressImage = (file) =>
-  new Promise((resolve, reject) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    img.onload = () => {
-      const max = 800;
-      const scale = Math.min(1, max / Math.max(img.width, img.height));
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.round(img.width * scale);
-      canvas.height = Math.round(img.height * scale);
-      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-      URL.revokeObjectURL(url);
-      resolve(canvas.toDataURL("image/jpeg", 0.72));
-    };
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("read failed")); };
-    img.src = url;
-  });
-
+const cat = (id) => CATEGORIES.find((c) => c.id === id) || CATEGORIES[0];
 const ago = (ts) => {
   const m = Math.floor((Date.now() - ts) / 60000);
   if (m < 60) return `${Math.max(1, m)}m ago`;
@@ -65,155 +21,118 @@ const ago = (ts) => {
   return `${Math.floor(m / 1440)}d ago`;
 };
 
-const cat = (id) => CATEGORIES.find((c) => c.id === id) || CATEGORIES[0];
-
-export default function HobbyHall() {
-  const [user, setUser] = useState(undefined); // undefined = loading, null = logged out
+export default function App() {
+  const [user, setUser] = useState(undefined); // undefined = loading
   const [posts, setPosts] = useState(null);
-  const [profiles, setProfiles] = useState({});
   const [filter, setFilter] = useState("all");
-  const [view, setView] = useState({ page: "feed" }); // feed | profile {name}
+  const [view, setView] = useState({ page: "feed" });
+  const [profileInfo, setProfileInfo] = useState(null);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ category: "fiber", title: "", body: "", image: null });
+  const [form, setForm] = useState({ category: "fiber", title: "", body: "", imageFile: null, preview: null });
   const [openComments, setOpenComments] = useState({});
   const [commentDrafts, setCommentDrafts] = useState({});
-  const [loginName, setLoginName] = useState("");
-  const [loginBio, setLoginBio] = useState("");
+  const [authMode, setAuthMode] = useState("login"); // login | signup
+  const [auth, setAuth] = useState({ email: "", password: "", name: "", bio: "" });
+  const [authError, setAuthError] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [imgBusy, setImgBusy] = useState(false);
   const fileRef = useRef(null);
 
-  // ---------- load ----------
-  useEffect(() => {
-    (async () => {
-      // session/profile (personal storage)
-      try {
-        const me = await window.storage.get(PROFILE_KEY);
-        setUser(me ? JSON.parse(me.value) : null);
-      } catch { setUser(null); }
-
-      // public profiles directory
-      try {
-        const dir = await window.storage.get(PROFILES_KEY);
-        if (dir) setProfiles(JSON.parse(dir.value));
-      } catch {}
-
-      // posts: index + per-post keys
-      let ids = null;
-      try {
-        const idx = await window.storage.get(INDEX_KEY);
-        if (idx) ids = JSON.parse(idx.value);
-      } catch {}
-
-      if (!ids) {
-        // migrate from v1 single-key format, or seed
-        let initial = SEED;
-        try {
-          const old = await window.storage.get("hobbyhall_posts_v1");
-          if (old) initial = JSON.parse(old.value).map((p) => ({ likedBy: [], image: null, comments: [], ...p }));
-        } catch {}
-        try {
-          await Promise.all(initial.map((p) => window.storage.set(POST_KEY(p.id), JSON.stringify(p))));
-          await window.storage.set(INDEX_KEY, JSON.stringify(initial.map((p) => p.id)));
-        } catch {}
-        setPosts(initial);
-        return;
-      }
-
-      const loaded = [];
-      await Promise.all(
-        ids.map(async (id) => {
-          try {
-            const r = await window.storage.get(POST_KEY(id));
-            if (r) loaded.push(JSON.parse(r.value));
-          } catch {}
-        })
-      );
-      loaded.sort((a, b) => b.ts - a.ts);
-      setPosts(loaded);
-    })();
+  const refreshUser = useCallback(async () => {
+    try { setUser(await api.getCurrentUser()); } catch { setUser(null); }
   }, []);
 
-  // ---------- storage helpers ----------
-  const savePost = async (post) => {
-    try { await window.storage.set(POST_KEY(post.id), JSON.stringify(post)); }
-    catch (e) { console.error("save post failed", e); }
-  };
+  const refreshPosts = useCallback(async () => {
+    try { setPosts(await api.listPosts()); }
+    catch (e) { console.error("load posts failed", e); setPosts([]); }
+  }, []);
 
-  const updatePost = (post) => {
-    setPosts((ps) => ps.map((p) => (p.id === post.id ? post : p)));
-    return savePost(post);
-  };
+  useEffect(() => {
+    refreshUser();
+    refreshPosts();
+    return api.onAuthChange(refreshUser);
+  }, [refreshUser, refreshPosts]);
+
+  useEffect(() => {
+    if (view.page === "profile") {
+      setProfileInfo(null);
+      api.getProfile(view.name).then(setProfileInfo).catch(() => setProfileInfo(null));
+    }
+  }, [view]);
 
   // ---------- auth ----------
-  const login = async () => {
-    const name = loginName.trim();
-    if (!name) return;
-    const me = { name, bio: loginBio.trim(), joined: profiles[name]?.joined || Date.now() };
-    setUser(me);
-    try { await window.storage.set(PROFILE_KEY, JSON.stringify(me)); } catch {}
-    const nextProfiles = { ...profiles, [name]: { bio: me.bio, joined: me.joined } };
-    setProfiles(nextProfiles);
-    try { await window.storage.set(PROFILES_KEY, JSON.stringify(nextProfiles)); } catch {}
-    setLoginName(""); setLoginBio("");
+  const submitAuth = async () => {
+    setAuthError("");
+    setAuthBusy(true);
+    try {
+      if (usingSupabase) {
+        if (authMode === "signup") {
+          if (!auth.email || !auth.password || !auth.name.trim()) throw new Error("Email, password, and display name are required.");
+          if (auth.password.length < 6) throw new Error("Password must be at least 6 characters.");
+          await api.signUp({ email: auth.email, password: auth.password, name: auth.name.trim(), bio: auth.bio.trim() });
+        } else {
+          await api.signIn({ email: auth.email, password: auth.password });
+        }
+      } else {
+        if (!auth.name.trim()) throw new Error("Enter a name to continue.");
+        await api.demoSignIn({ name: auth.name.trim(), bio: auth.bio.trim() });
+      }
+      await refreshUser();
+      setAuth({ email: "", password: "", name: "", bio: "" });
+    } catch (e) {
+      setAuthError(e.message || "Something went wrong — try again.");
+    }
+    setAuthBusy(false);
   };
 
   const logout = async () => {
+    await api.signOut();
     setUser(null);
     setView({ page: "feed" });
-    try { await window.storage.delete(PROFILE_KEY); } catch {}
   };
 
   // ---------- actions ----------
   const submitPost = async () => {
     if (!user || !form.title.trim()) return;
     setSaving(true);
-    const post = {
-      id: "p_" + Date.now(),
-      name: user.name,
-      category: form.category,
-      title: form.title.trim(),
-      body: form.body.trim(),
-      image: form.image,
-      likes: 0, likedBy: [], comments: [],
-      ts: Date.now(),
-    };
-    const next = [post, ...posts];
-    setPosts(next);
     try {
-      await window.storage.set(POST_KEY(post.id), JSON.stringify(post));
-      await window.storage.set(INDEX_KEY, JSON.stringify(next.map((p) => p.id)));
-    } catch (e) { console.error(e); }
-    setForm({ category: "fiber", title: "", body: "", image: null });
-    setShowForm(false);
+      await api.createPost(user, {
+        category: form.category,
+        title: form.title.trim(),
+        body: form.body.trim(),
+        imageFile: form.imageFile,
+      });
+      await refreshPosts();
+      setForm({ category: "fiber", title: "", body: "", imageFile: null, preview: null });
+      setShowForm(false);
+    } catch (e) {
+      alert("Couldn't post: " + (e.message || "unknown error"));
+    }
     setSaving(false);
   };
 
-  const toggleLike = (p) => {
+  const toggleLike = async (p) => {
     if (!user) return;
-    const has = p.likedBy?.includes(user.name);
-    const likedBy = has ? p.likedBy.filter((n) => n !== user.name) : [...(p.likedBy || []), user.name];
-    updatePost({ ...p, likedBy, likes: likedBy.length });
+    const liked = p.likedByIds.includes(user.id);
+    setPosts((ps) => ps.map((x) => x.id === p.id
+      ? { ...x, likedByIds: liked ? x.likedByIds.filter((i) => i !== user.id) : [...x.likedByIds, user.id] }
+      : x));
+    try { await api.setLike(user, p.id, !liked); } catch { refreshPosts(); }
   };
 
-  const addComment = (p) => {
+  const addComment = async (p) => {
     if (!user) return;
     const text = (commentDrafts[p.id] || "").trim();
     if (!text) return;
-    const comment = { id: "c_" + Date.now(), name: user.name, text, ts: Date.now() };
-    updatePost({ ...p, comments: [...(p.comments || []), comment] });
     setCommentDrafts({ ...commentDrafts, [p.id]: "" });
+    try { await api.addComment(user, p.id, text); await refreshPosts(); }
+    catch (e) { alert("Couldn't comment: " + (e.message || "unknown error")); }
   };
 
-  const pickImage = async (e) => {
+  const pickImage = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setImgBusy(true);
-    try {
-      const dataUrl = await compressImage(file);
-      setForm((f) => ({ ...f, image: dataUrl }));
-    } catch { alert("Couldn't read that image — try another file."); }
-    setImgBusy(false);
+    setForm((f) => ({ ...f, imageFile: file, preview: URL.createObjectURL(file) }));
     e.target.value = "";
   };
 
@@ -230,6 +149,8 @@ export default function HobbyHall() {
     <div style={{ minHeight: "100vh", background: "#F2F4F1", fontFamily: "'Inter', system-ui, sans-serif", color: "#1E2823" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Inter:wght@400;500;600&display=swap');
+        * { box-sizing: border-box; }
+        body { margin: 0; }
         .hh-card { transition: transform .15s ease, box-shadow .15s ease; }
         .hh-card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(30,40,35,.10); }
         button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid #2E7D4F; outline-offset: 2px; }
@@ -239,7 +160,7 @@ export default function HobbyHall() {
 
       {/* Header */}
       <header style={{ background: "#1E3A2F", color: "#F2F4F1", padding: "22px 20px 18px" }}>
-        <div style={{ maxWidth: 720, margin: "0 auto", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+        <div style={{ maxWidth: 720, margin: "0 auto", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
           <div>
             <button onClick={() => setView({ page: "feed" })} style={{ background: "none", border: "none", cursor: "pointer", color: "inherit", padding: 0, display: "flex", alignItems: "center", gap: 10 }}>
               <Compass size={22} strokeWidth={2.2} style={{ color: "#E0A62B" }} />
@@ -262,23 +183,62 @@ export default function HobbyHall() {
         </div>
       </header>
 
-      {/* Login card */}
+      {/* Demo-mode banner */}
+      {!usingSupabase && (
+        <div style={{ background: "#FDF3DC", borderBottom: "1px solid #EBD9A8", padding: "8px 16px", textAlign: "center", fontSize: 12.5, color: "#6B5A1E" }}>
+          Demo mode — data stays in this browser only. Add your Supabase keys to <code>.env</code> to go live (see README).
+        </div>
+      )}
+
+      {/* Auth card */}
       {user === null && (
         <div style={{ maxWidth: 720, margin: "16px auto 0", padding: "0 16px" }}>
           <div style={{ background: "#FFFFFF", border: "1px solid #E2E7E2", borderRadius: 14, padding: 18 }}>
-            <h2 style={{ fontFamily: "'Fraunces', serif", fontSize: 19, margin: "0 0 4px" }}>Join the hall</h2>
-            <p style={{ fontSize: 13, color: "#6B776F", margin: "0 0 12px" }}>Pick a name to post, comment, and like. Your profile is visible to everyone here.</p>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              <input style={{ ...inp, marginBottom: 0, flex: "1 1 160px" }} placeholder="Your name" maxLength={40}
-                value={loginName} onChange={(e) => setLoginName(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && login()} />
-              <input style={{ ...inp, marginBottom: 0, flex: "2 1 220px" }} placeholder="One-line bio (optional)" maxLength={120}
-                value={loginBio} onChange={(e) => setLoginBio(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && login()} />
-              <button onClick={login} disabled={!loginName.trim()}
-                style={{ background: "#1E3A2F", color: "#F2F4F1", border: "none", borderRadius: 9, padding: "10px 18px", fontSize: 14, fontWeight: 600, cursor: "pointer", opacity: loginName.trim() ? 1 : 0.5 }}>
-                Log in
+            <h2 style={{ fontFamily: "'Fraunces', serif", fontSize: 19, margin: "0 0 4px" }}>
+              {usingSupabase ? (authMode === "signup" ? "Create your account" : "Welcome back") : "Join the hall"}
+            </h2>
+            <p style={{ fontSize: 13, color: "#6B776F", margin: "0 0 12px" }}>
+              {usingSupabase
+                ? "Log in to post, comment, and like. Your display name and bio are public."
+                : "Pick a name to try the demo. Your profile is visible on this browser."}
+            </p>
+
+            <div style={{ display: "grid", gap: 8, gridTemplateColumns: "1fr 1fr" }}>
+              {usingSupabase && (
+                <>
+                  <input style={{ ...inp, marginBottom: 0 }} type="email" placeholder="Email" autoComplete="email"
+                    value={auth.email} onChange={(e) => setAuth({ ...auth, email: e.target.value })} />
+                  <input style={{ ...inp, marginBottom: 0 }} type="password" placeholder="Password"
+                    autoComplete={authMode === "signup" ? "new-password" : "current-password"}
+                    value={auth.password} onChange={(e) => setAuth({ ...auth, password: e.target.value })}
+                    onKeyDown={(e) => e.key === "Enter" && submitAuth()} />
+                </>
+              )}
+              {(authMode === "signup" || !usingSupabase) && (
+                <>
+                  <input style={{ ...inp, marginBottom: 0 }} placeholder="Display name" maxLength={40}
+                    value={auth.name} onChange={(e) => setAuth({ ...auth, name: e.target.value })}
+                    onKeyDown={(e) => e.key === "Enter" && submitAuth()} />
+                  <input style={{ ...inp, marginBottom: 0 }} placeholder="One-line bio (optional)" maxLength={120}
+                    value={auth.bio} onChange={(e) => setAuth({ ...auth, bio: e.target.value })}
+                    onKeyDown={(e) => e.key === "Enter" && submitAuth()} />
+                </>
+              )}
+            </div>
+
+            {authError && <p style={{ color: "#B54A32", fontSize: 13, margin: "10px 0 0" }}>{authError}</p>}
+
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 12, flexWrap: "wrap" }}>
+              <button onClick={submitAuth} disabled={authBusy}
+                style={{ background: "#1E3A2F", color: "#F2F4F1", border: "none", borderRadius: 9, padding: "10px 18px", fontSize: 14, fontWeight: 600, cursor: "pointer", opacity: authBusy ? 0.6 : 1 }}>
+                {authBusy ? "One moment…" : usingSupabase ? (authMode === "signup" ? "Create account" : "Log in") : "Enter the hall"}
               </button>
+              {usingSupabase && (
+                <button onClick={() => { setAuthMode(authMode === "signup" ? "login" : "signup"); setAuthError(""); }}
+                  style={{ background: "none", border: "none", cursor: "pointer", color: "#2E7D4F", fontSize: 13, fontWeight: 600, padding: 0 }}>
+                  {authMode === "signup" ? "Have an account? Log in" : "New here? Create an account"}
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -293,27 +253,27 @@ export default function HobbyHall() {
           </button>
           <div style={{ background: "#FFFFFF", border: "1px solid #E2E7E2", borderRadius: 14, padding: 18 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <div style={{ width: 52, height: 52, borderRadius: "50%", background: "#1E3A2F", color: "#E0A62B", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 700 }}>
+              <div style={{ width: 52, height: 52, borderRadius: "50%", background: "#1E3A2F", color: "#E0A62B", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Fraunces', serif", fontSize: 24, fontWeight: 700, flexShrink: 0 }}>
                 {view.name?.[0]?.toUpperCase()}
               </div>
               <div>
                 <h2 style={{ fontFamily: "'Fraunces', serif", fontSize: 22, margin: 0 }}>{view.name}</h2>
                 <p style={{ fontSize: 13, color: "#6B776F", margin: "2px 0 0" }}>
-                  {profiles[view.name]?.bio || "No bio yet."}
-                  {profiles[view.name]?.joined ? ` · Joined ${new Date(profiles[view.name].joined).toLocaleDateString()}` : ""}
+                  {profileInfo?.bio || "No bio yet."}
+                  {profileInfo?.joined ? ` · Joined ${new Date(profileInfo.joined).toLocaleDateString()}` : ""}
                 </p>
               </div>
             </div>
             {shown && (
               <p style={{ fontSize: 12.5, color: "#6B776F", margin: "12px 0 0" }}>
-                {shown.length} post{shown.length === 1 ? "" : "s"} · {shown.reduce((s, p) => s + (p.likes || 0), 0)} likes received
+                {shown.length} post{shown.length === 1 ? "" : "s"} · {shown.reduce((s, p) => s + p.likedByIds.length, 0)} likes received
               </p>
             )}
           </div>
         </div>
       )}
 
-      {/* Filters (feed only) */}
+      {/* Filters */}
       {view.page === "feed" && (
         <div style={{ maxWidth: 720, margin: "0 auto", padding: "16px 16px 0", display: "flex", gap: 8, overflowX: "auto" }}>
           {[{ id: "all", label: "All", emoji: "✳️" }, ...CATEGORIES].map((c) => (
@@ -322,7 +282,7 @@ export default function HobbyHall() {
                 border: "1px solid " + (filter === c.id ? "#1E3A2F" : "#CBD3CC"),
                 background: filter === c.id ? "#1E3A2F" : "#FFFFFF",
                 color: filter === c.id ? "#F2F4F1" : "#1E2823",
-                borderRadius: 999, padding: "7px 14px", fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", cursor: "pointer",
+                borderRadius: 999, padding: "7px 14px", fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", cursor: "pointer", flexShrink: 0,
               }}>
               {c.emoji} {c.label}
             </button>
@@ -341,14 +301,13 @@ export default function HobbyHall() {
         )}
         {shown && shown.map((p) => {
           const c = cat(p.category);
-          const isLiked = user && p.likedBy?.includes(user.name);
-          const comments = p.comments || [];
+          const isLiked = user && p.likedByIds.includes(user.id);
           const open = openComments[p.id];
           return (
             <article key={p.id} className="hh-card"
               style={{ background: "#FFFFFF", borderRadius: 14, padding: "18px 18px 12px", marginBottom: 14, border: "1px solid #E2E7E2", borderLeft: `4px solid ${c.hue}` }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                <span aria-hidden style={{ width: 34, height: 34, borderRadius: "50%", background: c.hue + "1A", border: `1.5px solid ${c.hue}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>{c.emoji}</span>
+                <span aria-hidden style={{ width: 34, height: 34, borderRadius: "50%", background: c.hue + "1A", border: `1.5px solid ${c.hue}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, flexShrink: 0 }}>{c.emoji}</span>
                 <div>
                   <button className="hh-name" onClick={() => openProfile(p.name)}
                     style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 13, fontWeight: 600, color: "#1E2823" }}>
@@ -360,7 +319,7 @@ export default function HobbyHall() {
               <h2 style={{ fontFamily: "'Fraunces', serif", fontSize: 19, fontWeight: 700, margin: "0 0 6px", lineHeight: 1.25 }}>{p.title}</h2>
               {p.body && <p style={{ fontSize: 14.5, lineHeight: 1.55, margin: "0 0 10px", color: "#3A4540" }}>{p.body}</p>}
               {p.image && (
-                <img src={p.image} alt={p.title}
+                <img src={p.image} alt={p.title} loading="lazy"
                   style={{ width: "100%", borderRadius: 10, marginBottom: 10, border: "1px solid #E2E7E2", display: "block" }} />
               )}
 
@@ -369,28 +328,27 @@ export default function HobbyHall() {
                   aria-label={isLiked ? "Remove like" : "Like this post"}
                   title={user ? "" : "Log in to like"}
                   style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: user ? "pointer" : "default", color: isLiked ? "#B54A32" : "#6B776F", fontSize: 13, fontWeight: 500, padding: "6px 0", opacity: user ? 1 : 0.6 }}>
-                  <Heart size={17} fill={isLiked ? "#B54A32" : "none"} strokeWidth={2} /> {p.likes || 0}
+                  <Heart size={17} fill={isLiked ? "#B54A32" : "none"} strokeWidth={2} /> {p.likedByIds.length}
                 </button>
                 <button onClick={() => setOpenComments({ ...openComments, [p.id]: !open })}
                   style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", color: "#6B776F", fontSize: 13, fontWeight: 500, padding: "6px 0" }}>
-                  <MessageCircle size={17} strokeWidth={2} /> {comments.length}
+                  <MessageCircle size={17} strokeWidth={2} /> {p.comments.length}
                 </button>
               </div>
 
               {open && (
                 <div style={{ borderTop: "1px solid #EDF0ED", marginTop: 4, paddingTop: 10 }}>
-                  {comments.map((cm) => (
+                  {p.comments.map((cm) => (
                     <div key={cm.id} style={{ marginBottom: 10 }}>
-                      <span style={{ fontSize: 12.5, fontWeight: 600 }}>
-                        <button className="hh-name" onClick={() => openProfile(cm.name)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", font: "inherit", color: "#1E2823" }}>{cm.name}</button>
-                      </span>
+                      <button className="hh-name" onClick={() => openProfile(cm.name)}
+                        style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 12.5, fontWeight: 600, color: "#1E2823" }}>{cm.name}</button>
                       <span style={{ fontSize: 11.5, color: "#9AA49D", marginLeft: 6 }}>{ago(cm.ts)}</span>
                       <p style={{ fontSize: 13.5, margin: "2px 0 0", color: "#3A4540", lineHeight: 1.45 }}>{cm.text}</p>
                     </div>
                   ))}
                   {user ? (
                     <div style={{ display: "flex", gap: 8 }}>
-                      <input style={{ ...inp, marginBottom: 0, flex: 1 }} placeholder="Add a comment…" maxLength={300}
+                      <input style={{ ...inp, marginBottom: 0, flex: 1 }} placeholder="Add a comment…" maxLength={500}
                         value={commentDrafts[p.id] || ""}
                         onChange={(e) => setCommentDrafts({ ...commentDrafts, [p.id]: e.target.value })}
                         onKeyDown={(e) => e.key === "Enter" && addComment(p)} />
@@ -439,28 +397,28 @@ export default function HobbyHall() {
             </div>
 
             <label style={lbl}>Title</label>
-            <input style={inp} value={form.title} maxLength={90} placeholder="What are you making or learning?"
+            <input style={inp} value={form.title} maxLength={120} placeholder="What are you making or learning?"
               onChange={(e) => setForm({ ...form, title: e.target.value })} />
 
             <label style={lbl}>Tell the story (optional)</label>
-            <textarea style={{ ...inp, minHeight: 90, resize: "vertical" }} value={form.body} maxLength={600}
+            <textarea style={{ ...inp, minHeight: 90, resize: "vertical" }} value={form.body} maxLength={2000}
               placeholder="Process, lessons, tips for others…"
               onChange={(e) => setForm({ ...form, body: e.target.value })} />
 
             <label style={lbl}>Photo (optional)</label>
             <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={pickImage} />
-            {form.image ? (
+            {form.preview ? (
               <div style={{ position: "relative", marginBottom: 14 }}>
-                <img src={form.image} alt="Preview" style={{ width: "100%", borderRadius: 10, border: "1px solid #E2E7E2", display: "block" }} />
-                <button onClick={() => setForm({ ...form, image: null })} aria-label="Remove photo"
+                <img src={form.preview} alt="Preview" style={{ width: "100%", borderRadius: 10, border: "1px solid #E2E7E2", display: "block" }} />
+                <button onClick={() => setForm({ ...form, imageFile: null, preview: null })} aria-label="Remove photo"
                   style={{ position: "absolute", top: 8, right: 8, background: "rgba(30,40,35,.75)", color: "#FFF", border: "none", borderRadius: 999, padding: 6, cursor: "pointer", display: "flex" }}>
                   <X size={14} />
                 </button>
               </div>
             ) : (
-              <button onClick={() => fileRef.current?.click()} disabled={imgBusy}
+              <button onClick={() => fileRef.current?.click()}
                 style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", justifyContent: "center", border: "1.5px dashed #CBD3CC", background: "#FAFBFA", borderRadius: 10, padding: "14px", fontSize: 13.5, color: "#6B776F", cursor: "pointer", marginBottom: 14 }}>
-                <ImageIcon size={16} /> {imgBusy ? "Processing photo…" : "Add a photo"}
+                <ImageIcon size={16} /> Add a photo
               </button>
             )}
 
@@ -469,7 +427,7 @@ export default function HobbyHall() {
               {saving ? "Posting…" : "Post to the hall"}
             </button>
             <p style={{ fontSize: 11.5, color: "#6B776F", marginTop: 10, textAlign: "center" }}>
-              Posts, photos, comments, and profiles are shared — everyone using this app can see them.
+              Posts, photos, comments, and profiles are public to everyone on this site.
             </p>
           </div>
         </div>
@@ -480,6 +438,6 @@ export default function HobbyHall() {
 
 const lbl = { display: "block", fontSize: 12.5, fontWeight: 600, marginBottom: 5, color: "#3A4540" };
 const inp = {
-  width: "100%", boxSizing: "border-box", border: "1px solid #CBD3CC", borderRadius: 9,
+  width: "100%", border: "1px solid #CBD3CC", borderRadius: 9,
   padding: "10px 12px", fontSize: 14, marginBottom: 14, fontFamily: "inherit", background: "#FAFBFA",
 };
