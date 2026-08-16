@@ -52,7 +52,7 @@ const sb = {
   },
 
   onAuthChange(callback) {
-    const { data } = supabase.auth.onAuthStateChange(() => callback());
+    const { data } = supabase.auth.onAuthStateChange((event) => callback(event));
     return () => data.subscription.unsubscribe();
   },
 
@@ -77,6 +77,18 @@ const sb = {
   },
 
   async signOut() { await supabase.auth.signOut(); },
+
+  async requestPasswordReset(email) {
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: window.location.origin,
+    });
+    if (error) throw error;
+  },
+
+  async updatePassword(newPassword) {
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    if (error) throw error;
+  },
 
   async listPosts() {
     const { data, error } = await supabase
@@ -172,6 +184,9 @@ const demo = {
     return me;
   },
   async signOut() { try { localStorage.removeItem('hh:me'); } catch {} },
+
+  async requestPasswordReset() { throw new Error('Password reset needs Supabase configured — demo mode has no real passwords.'); },
+  async updatePassword() { throw new Error('Password reset needs Supabase configured — demo mode has no real passwords.'); },
 
   async listPosts() {
     let posts = lsGet('posts', null);

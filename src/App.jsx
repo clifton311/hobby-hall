@@ -31,10 +31,15 @@ export default function App() {
   const [form, setForm] = useState({ category: "fiber", title: "", body: "", imageFile: null, preview: null });
   const [openComments, setOpenComments] = useState({});
   const [commentDrafts, setCommentDrafts] = useState({});
-  const [authMode, setAuthMode] = useState("login"); // login | signup
+  const [authMode, setAuthMode] = useState("login"); // login | signup | forgot
   const [auth, setAuth] = useState({ email: "", password: "", name: "", bio: "" });
   const [authError, setAuthError] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
+  const [resetSent, setResetSent] = useState(false);
+  const [recovery, setRecovery] = useState(false); // true once a password-recovery link lands us back here
+  const [resetForm, setResetForm] = useState({ password: "", confirm: "" });
+  const [resetError, setResetError] = useState("");
+  const [resetBusy, setResetBusy] = useState(false);
   const [saving, setSaving] = useState(false);
   const fileRef = useRef(null);
 
@@ -50,7 +55,10 @@ export default function App() {
   useEffect(() => {
     refreshUser();
     refreshPosts();
-    return api.onAuthChange(refreshUser);
+    return api.onAuthChange((event) => {
+      if (event === "PASSWORD_RECOVERY") setRecovery(true);
+      refreshUser();
+    });
   }, [refreshUser, refreshPosts]);
 
   useEffect(() => {
@@ -65,7 +73,11 @@ export default function App() {
     setAuthError("");
     setAuthBusy(true);
     try {
-      if (usingSupabase) {
+      if (usingSupabase && authMode === "forgot") {
+        if (!auth.email) throw new Error("Enter your email to get a reset link.");
+        await api.requestPasswordReset(auth.email);
+        setResetSent(true);
+      } else if (usingSupabase) {
         if (authMode === "signup") {
           if (!auth.email || !auth.password || !auth.name.trim()) throw new Error("Email, password, and display name are required.");
           if (auth.password.length < 6) throw new Error("Password must be at least 6 characters.");
@@ -73,16 +85,48 @@ export default function App() {
         } else {
           await api.signIn({ email: auth.email, password: auth.password });
         }
+        await refreshUser();
+        setAuth({ email: "", password: "", name: "", bio: "" });
       } else {
         if (!auth.name.trim()) throw new Error("Enter a name to continue.");
         await api.demoSignIn({ name: auth.name.trim(), bio: auth.bio.trim() });
+        await refreshUser();
+        setAuth({ email: "", password: "", name: "", bio: "" });
       }
-      await refreshUser();
-      setAuth({ email: "", password: "", name: "", bio: "" });
     } catch (e) {
       setAuthError(e.message || "Something went wrong — try again.");
     }
     setAuthBusy(false);
+  };
+
+  const switchAuthMode = (mode) => {
+    setAuthMode(mode);
+    setAuthError("");
+    setResetSent(false);
+  };
+
+  const submitNewPassword = async () => {
+    setResetError("");
+    if (resetForm.password.length < 6) return setResetError("Password must be at least 6 characters.");
+    if (resetForm.password !== resetForm.confirm) return setResetError("Passwords don't match.");
+    setResetBusy(true);
+    try {
+      await api.updatePassword(resetForm.password);
+      setRecovery(false);
+      setResetForm({ password: "", confirm: "" });
+      await refreshUser();
+    } catch (e) {
+      setResetError(e.message || "Couldn't update your password — try again.");
+    }
+    setResetBusy(false);
+  };
+
+  const cancelRecovery = async () => {
+    await api.signOut();
+    setRecovery(false);
+    setResetForm({ password: "", confirm: "" });
+    setResetError("");
+    setUser(null);
   };
 
   const logout = async () => {
@@ -194,52 +238,108 @@ export default function App() {
       {user === null && (
         <div style={{ maxWidth: 720, margin: "16px auto 0", padding: "0 16px" }}>
           <div style={{ background: "#FFFFFF", border: "1px solid #E2E7E2", borderRadius: 14, padding: 18 }}>
-            <h2 style={{ fontFamily: "'Fraunces', serif", fontSize: 19, margin: "0 0 4px" }}>
-              {usingSupabase ? (authMode === "signup" ? "Create your account" : "Welcome back") : "Join the hall"}
-            </h2>
-            <p style={{ fontSize: 13, color: "#6B776F", margin: "0 0 12px" }}>
-              {usingSupabase
-                ? "Log in to post, comment, and like. Your display name and bio are public."
-                : "Pick a name to try the demo. Your profile is visible on this browser."}
-            </p>
+            {usingSupabase && (
+              <div role="tablist" aria-label="Log in or sign up" style={{ display: "flex", gap: 4, background: "#F2F4F1", borderRadius: 10, padding: 4, marginBottom: 16 }}>
+                {["login", "signup"].map((mode) => (
+                  <button key={mode} role="tab" aria-selected={authMode === mode}
+                    onClick={() => switchAuthMode(mode)}
+                    style={{
+                      flex: 1, border: "none", borderRadius: 7, padding: "9px 0", fontSize: 13.5, fontWeight: 600, cursor: "pointer",
+                      background: authMode === mode ? "#1E3A2F" : "transparent",
+                      color: authMode === mode ? "#F2F4F1" : "#3A4540",
+                    }}>
+                    {mode === "login" ? "Log in" : "Sign up"}
+                  </button>
+                ))}
+              </div>
+            )}
 
-            <div style={{ display: "grid", gap: 8, gridTemplateColumns: "1fr 1fr" }}>
-              {usingSupabase && (
-                <>
-                  <input style={{ ...inp, marginBottom: 0 }} type="email" placeholder="Email" autoComplete="email"
-                    value={auth.email} onChange={(e) => setAuth({ ...auth, email: e.target.value })} />
-                  <input style={{ ...inp, marginBottom: 0 }} type="password" placeholder="Password"
-                    autoComplete={authMode === "signup" ? "new-password" : "current-password"}
-                    value={auth.password} onChange={(e) => setAuth({ ...auth, password: e.target.value })}
-                    onKeyDown={(e) => e.key === "Enter" && submitAuth()} />
-                </>
-              )}
-              {(authMode === "signup" || !usingSupabase) && (
-                <>
-                  <input style={{ ...inp, marginBottom: 0 }} placeholder="Display name" maxLength={40}
-                    value={auth.name} onChange={(e) => setAuth({ ...auth, name: e.target.value })}
-                    onKeyDown={(e) => e.key === "Enter" && submitAuth()} />
-                  <input style={{ ...inp, marginBottom: 0 }} placeholder="One-line bio (optional)" maxLength={120}
-                    value={auth.bio} onChange={(e) => setAuth({ ...auth, bio: e.target.value })}
-                    onKeyDown={(e) => e.key === "Enter" && submitAuth()} />
-                </>
-              )}
-            </div>
+            {authMode === "forgot" ? (
+              <>
+                <h2 style={{ fontFamily: "'Fraunces', serif", fontSize: 19, margin: "0 0 4px" }}>Reset your password</h2>
+                {resetSent ? (
+                  <p style={{ fontSize: 13, color: "#3A4540", margin: "0 0 4px" }}>
+                    Check <strong>{auth.email}</strong> for a link to set a new password.
+                  </p>
+                ) : (
+                  <>
+                    <p style={{ fontSize: 13, color: "#6B776F", margin: "0 0 12px" }}>
+                      Enter your email and we'll send you a link to set a new password.
+                    </p>
+                    <input style={{ ...inp, marginBottom: 0 }} type="email" placeholder="Email" autoComplete="email"
+                      value={auth.email} onChange={(e) => setAuth({ ...auth, email: e.target.value })}
+                      onKeyDown={(e) => e.key === "Enter" && submitAuth()} />
+                  </>
+                )}
 
-            {authError && <p style={{ color: "#B54A32", fontSize: 13, margin: "10px 0 0" }}>{authError}</p>}
+                {authError && <p style={{ color: "#B54A32", fontSize: 13, margin: "10px 0 0" }}>{authError}</p>}
 
-            <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 12, flexWrap: "wrap" }}>
-              <button onClick={submitAuth} disabled={authBusy}
-                style={{ background: "#1E3A2F", color: "#F2F4F1", border: "none", borderRadius: 9, padding: "10px 18px", fontSize: 14, fontWeight: 600, cursor: "pointer", opacity: authBusy ? 0.6 : 1 }}>
-                {authBusy ? "One moment…" : usingSupabase ? (authMode === "signup" ? "Create account" : "Log in") : "Enter the hall"}
-              </button>
-              {usingSupabase && (
-                <button onClick={() => { setAuthMode(authMode === "signup" ? "login" : "signup"); setAuthError(""); }}
-                  style={{ background: "none", border: "none", cursor: "pointer", color: "#2E7D4F", fontSize: 13, fontWeight: 600, padding: 0 }}>
-                  {authMode === "signup" ? "Have an account? Log in" : "New here? Create an account"}
-                </button>
-              )}
-            </div>
+                <div style={{ marginTop: 12 }}>
+                  {!resetSent && (
+                    <button onClick={submitAuth} disabled={authBusy}
+                      style={{ width: "100%", background: "#1E3A2F", color: "#F2F4F1", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 14, fontWeight: 600, cursor: "pointer", opacity: authBusy ? 0.6 : 1 }}>
+                      {authBusy ? "Sending…" : "Send reset link"}
+                    </button>
+                  )}
+                  <button onClick={() => switchAuthMode("login")}
+                    style={{ display: "block", margin: resetSent ? "0" : "10px auto 0", background: "none", border: "none", cursor: "pointer", color: "#2E7D4F", fontSize: 13, fontWeight: 600, padding: 0 }}>
+                    Back to log in
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h2 style={{ fontFamily: "'Fraunces', serif", fontSize: 19, margin: "0 0 4px" }}>
+                  {usingSupabase ? (authMode === "signup" ? "Create your account" : "Welcome back") : "Join the hall"}
+                </h2>
+                <p style={{ fontSize: 13, color: "#6B776F", margin: "0 0 12px" }}>
+                  {usingSupabase
+                    ? authMode === "signup"
+                      ? "Create an account to post, comment, and like. Your display name and bio are public."
+                      : "Log in to post, comment, and like."
+                    : "Pick a name to try the demo. Your profile is visible on this browser."}
+                </p>
+
+                <div style={{ display: "grid", gap: 8, gridTemplateColumns: "1fr 1fr" }}>
+                  {usingSupabase && (
+                    <>
+                      <input style={{ ...inp, marginBottom: 0 }} type="email" placeholder="Email" autoComplete="email"
+                        value={auth.email} onChange={(e) => setAuth({ ...auth, email: e.target.value })} />
+                      <input style={{ ...inp, marginBottom: 0 }} type="password" placeholder="Password"
+                        autoComplete={authMode === "signup" ? "new-password" : "current-password"}
+                        value={auth.password} onChange={(e) => setAuth({ ...auth, password: e.target.value })}
+                        onKeyDown={(e) => e.key === "Enter" && submitAuth()} />
+                    </>
+                  )}
+                  {(authMode === "signup" || !usingSupabase) && (
+                    <>
+                      <input style={{ ...inp, marginBottom: 0 }} placeholder="Display name" maxLength={40}
+                        value={auth.name} onChange={(e) => setAuth({ ...auth, name: e.target.value })}
+                        onKeyDown={(e) => e.key === "Enter" && submitAuth()} />
+                      <input style={{ ...inp, marginBottom: 0 }} placeholder="One-line bio (optional)" maxLength={120}
+                        value={auth.bio} onChange={(e) => setAuth({ ...auth, bio: e.target.value })}
+                        onKeyDown={(e) => e.key === "Enter" && submitAuth()} />
+                    </>
+                  )}
+                </div>
+
+                {usingSupabase && authMode === "login" && (
+                  <button onClick={() => switchAuthMode("forgot")}
+                    style={{ display: "block", background: "none", border: "none", cursor: "pointer", color: "#2E7D4F", fontSize: 12.5, fontWeight: 600, padding: 0, margin: "8px 0 0" }}>
+                    Forgot password?
+                  </button>
+                )}
+
+                {authError && <p style={{ color: "#B54A32", fontSize: 13, margin: "10px 0 0" }}>{authError}</p>}
+
+                <div style={{ marginTop: 12 }}>
+                  <button onClick={submitAuth} disabled={authBusy}
+                    style={{ width: "100%", background: "#1E3A2F", color: "#F2F4F1", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 14, fontWeight: 600, cursor: "pointer", opacity: authBusy ? 0.6 : 1 }}>
+                    {authBusy ? "One moment…" : usingSupabase ? (authMode === "signup" ? "Create account" : "Log in") : "Enter the hall"}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -429,6 +529,36 @@ export default function App() {
             <p style={{ fontSize: 11.5, color: "#6B776F", marginTop: 10, textAlign: "center" }}>
               Posts, photos, comments, and profiles are public to everyone on this site.
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Password recovery */}
+      {recovery && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(20,28,24,.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60, padding: 16 }}>
+          <div style={{ background: "#FFFFFF", width: "100%", maxWidth: 400, borderRadius: 14, padding: 20 }}>
+            <h2 style={{ fontFamily: "'Fraunces', serif", fontSize: 19, margin: "0 0 4px" }}>Set a new password</h2>
+            <p style={{ fontSize: 13, color: "#6B776F", margin: "0 0 12px" }}>Choose a new password for your account.</p>
+
+            <input style={inp} type="password" placeholder="New password" autoComplete="new-password"
+              value={resetForm.password} onChange={(e) => setResetForm({ ...resetForm, password: e.target.value })}
+              onKeyDown={(e) => e.key === "Enter" && submitNewPassword()} />
+            <input style={{ ...inp, marginBottom: 0 }} type="password" placeholder="Confirm new password" autoComplete="new-password"
+              value={resetForm.confirm} onChange={(e) => setResetForm({ ...resetForm, confirm: e.target.value })}
+              onKeyDown={(e) => e.key === "Enter" && submitNewPassword()} />
+
+            {resetError && <p style={{ color: "#B54A32", fontSize: 13, margin: "10px 0 0" }}>{resetError}</p>}
+
+            <div style={{ marginTop: 14 }}>
+              <button onClick={submitNewPassword} disabled={resetBusy}
+                style={{ width: "100%", background: "#1E3A2F", color: "#F2F4F1", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 14, fontWeight: 600, cursor: "pointer", opacity: resetBusy ? 0.6 : 1 }}>
+                {resetBusy ? "Saving…" : "Save new password"}
+              </button>
+              <button onClick={cancelRecovery}
+                style={{ display: "block", margin: "10px auto 0", background: "none", border: "none", cursor: "pointer", color: "#6B776F", fontSize: 13, fontWeight: 600, padding: 0 }}>
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}
