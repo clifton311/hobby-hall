@@ -48,7 +48,7 @@ const sb = {
     const { data: profile } = await supabase
       .from('profiles').select('*').eq('id', session.user.id).single();
     if (!profile) return null;
-    return { id: profile.id, name: profile.name, bio: profile.bio, joined: profile.created_at };
+    return { id: profile.id, name: profile.name, bio: profile.bio, joined: profile.created_at, isAdmin: !!profile.is_admin };
   },
 
   onAuthChange(callback) {
@@ -144,6 +144,33 @@ const sb = {
     if (error) throw error;
   },
 
+  // Returns { alreadyReported } so the UI can tell a duplicate from a new report.
+  async reportContent(user, { postId = null, commentId = null, reason }) {
+    const { error } = await supabase.from('reports')
+      .insert({ reporter_id: user.id, post_id: postId, comment_id: commentId, reason });
+    if (error?.code === '23505') return { alreadyReported: true };
+    if (error) throw error;
+    return { alreadyReported: false };
+  },
+
+  // RLS decides who may delete (owner or admin); zero rows back means not allowed.
+  async deletePost(user, post) {
+    const { data, error } = await supabase.from('posts').delete().eq('id', post.id).select('id');
+    if (error) throw error;
+    if (!data?.length) throw new Error("You can't delete this post.");
+    const marker = '/object/public/photos/';
+    if (post.image?.includes(marker)) {
+      const path = decodeURIComponent(post.image.split(marker)[1]);
+      await supabase.storage.from('photos').remove([path]); // best effort
+    }
+  },
+
+  async deleteComment(user, commentId) {
+    const { data, error } = await supabase.from('comments').delete().eq('id', commentId).select('id');
+    if (error) throw error;
+    if (!data?.length) throw new Error("You can't delete this comment.");
+  },
+
   async getProfile(name) {
     const { data } = await supabase.from('profiles')
       .select('name, bio, created_at').eq('name', name).maybeSingle();
@@ -168,7 +195,11 @@ const SEED = [
 ];
 
 const demo = {
-  async getCurrentUser() { return lsGet('me', null); },
+  async getCurrentUser() {
+    const me = lsGet('me', null);
+    // Demo admin: set "isAdmin": true on your entry in localStorage "hh:profiles".
+    return me && { ...me, isAdmin: !!lsGet('profiles', {})[me.name]?.isAdmin };
+  },
   onAuthChange() { return () => {}; },
 
   async signUp({ name, bio }) { return demo.demoSignIn({ name, bio }); },
@@ -181,7 +212,7 @@ const demo = {
     lsSet('profiles', profiles);
     const me = { id, name, bio: profiles[name].bio, joined: profiles[name].joined };
     lsSet('me', me);
-    return me;
+    return { ...me, isAdmin: !!profiles[name].isAdmin };
   },
   async signOut() { try { localStorage.removeItem('hh:me'); } catch {} },
 
@@ -218,6 +249,37 @@ const demo = {
     if (!p) return;
     p.comments = [...(p.comments || []), { id: 'c_' + Date.now(), name: user.name, text, ts: Date.now() }];
     lsSet('posts', posts);
+  },
+
+  async reportContent(user, { postId = null, commentId = null, reason }) {
+    if (!reason || reason.length > 300) throw new Error('Pick a reason for the report.');
+    const reports = lsGet('reports', []);
+    if (reports.some((r) => r.reporterId === user.id && r.postId === postId && r.commentId === commentId)) {
+      return { alreadyReported: true };
+    }
+    reports.push({ id: 'r_' + Date.now(), reporterId: user.id, postId, commentId, reason, ts: Date.now() });
+    lsSet('reports', reports);
+    return { alreadyReported: false };
+  },
+
+  async deletePost(user, post) {
+    const me = await demo.getCurrentUser();
+    const posts = await demo.listPosts();
+    const p = posts.find((x) => x.id === post.id);
+    if (!p || !me || me.id !== user.id || (!me.isAdmin && p.userId !== me.id)) throw new Error("You can't delete this post.");
+    lsSet('posts', posts.filter((x) => x.id !== post.id));
+    lsSet('reports', lsGet('reports', []).filter((r) => r.postId !== post.id && !p.comments.some((c) => c.id === r.commentId)));
+  },
+
+  async deleteComment(user, commentId) {
+    const me = await demo.getCurrentUser();
+    const posts = await demo.listPosts();
+    const p = posts.find((x) => (x.comments || []).some((c) => c.id === commentId));
+    const cm = p?.comments.find((c) => c.id === commentId);
+    if (!cm || !me || me.id !== user.id || (!me.isAdmin && cm.name !== me.name)) throw new Error("You can't delete this comment.");
+    p.comments = p.comments.filter((c) => c.id !== commentId);
+    lsSet('posts', posts);
+    lsSet('reports', lsGet('reports', []).filter((r) => r.commentId !== commentId));
   },
 
   async getProfile(name) {

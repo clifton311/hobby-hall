@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Heart, Plus, X, Compass, MessageCircle, ImageIcon, LogOut, User, ArrowLeft } from "lucide-react";
+import { Heart, Plus, X, Compass, MessageCircle, ImageIcon, LogOut, User, ArrowLeft, Flag, Trash2 } from "lucide-react";
 import { api, usingSupabase } from "./api";
 
 const CATEGORIES = [
@@ -12,6 +12,8 @@ const CATEGORIES = [
   { id: "maker", label: "Tech & Making", emoji: "🔧", hue: "#3A7C8C" },
   { id: "outdoor", label: "Outdoors", emoji: "⛰️", hue: "#5B7043" },
 ];
+
+const REPORT_REASONS = ["Spam or advertising", "Harassment or hate", "Inappropriate or unsafe content", "Off-topic or misleading", "Something else"];
 
 const cat = (id) => CATEGORIES.find((c) => c.id === id) || CATEGORIES[0];
 const ago = (ts) => {
@@ -41,6 +43,11 @@ export default function App() {
   const [resetError, setResetError] = useState("");
   const [resetBusy, setResetBusy] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [reporting, setReporting] = useState(null); // { postId } | { commentId }, plus a label
+  const [reportReason, setReportReason] = useState("");
+  const [reportError, setReportError] = useState("");
+  const [reportBusy, setReportBusy] = useState(false);
+  const [notice, setNotice] = useState("");
   const fileRef = useRef(null);
 
   const refreshUser = useCallback(async () => {
@@ -67,6 +74,12 @@ export default function App() {
       api.getProfile(view.name).then(setProfileInfo).catch(() => setProfileInfo(null));
     }
   }, [view]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(""), 3500);
+    return () => clearTimeout(t);
+  }, [notice]);
 
   // ---------- auth ----------
   const submitAuth = async () => {
@@ -171,6 +184,42 @@ export default function App() {
     setCommentDrafts({ ...commentDrafts, [p.id]: "" });
     try { await api.addComment(user, p.id, text); await refreshPosts(); }
     catch (e) { alert("Couldn't comment: " + (e.message || "unknown error")); }
+  };
+
+  const openReport = (target) => {
+    setReporting(target);
+    setReportReason("");
+    setReportError("");
+  };
+
+  const submitReport = async () => {
+    if (!user || !reporting || !reportReason) return;
+    setReportBusy(true);
+    setReportError("");
+    try {
+      const { alreadyReported } = await api.reportContent(user, {
+        postId: reporting.postId, commentId: reporting.commentId, reason: reportReason,
+      });
+      setReporting(null);
+      setNotice(alreadyReported ? "You've already reported this." : "Thanks — a moderator will take a look.");
+    } catch (e) {
+      setReportError(e.message || "Couldn't send the report — try again.");
+    }
+    setReportBusy(false);
+  };
+
+  const removePost = async (p) => {
+    if (!window.confirm(`Delete "${p.title}" by ${p.name}? This can't be undone.`)) return;
+    try { await api.deletePost(user, p); setNotice("Post deleted."); }
+    catch (e) { alert("Couldn't delete: " + (e.message || "unknown error")); }
+    await refreshPosts();
+  };
+
+  const removeComment = async (cm) => {
+    if (!window.confirm(`Delete this comment by ${cm.name}? This can't be undone.`)) return;
+    try { await api.deleteComment(user, cm.id); setNotice("Comment deleted."); }
+    catch (e) { alert("Couldn't delete: " + (e.message || "unknown error")); }
+    await refreshPosts();
   };
 
   const pickImage = (e) => {
@@ -434,6 +483,20 @@ export default function App() {
                   style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", color: "#6B776F", fontSize: 13, fontWeight: 500, padding: "6px 0" }}>
                   <MessageCircle size={17} strokeWidth={2} /> {p.comments.length}
                 </button>
+                <div style={{ marginLeft: "auto", display: "flex", gap: 14 }}>
+                  {user && p.userId !== user.id && (
+                    <button onClick={() => openReport({ postId: p.id, label: "post" })} aria-label="Report this post" title="Report"
+                      style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", cursor: "pointer", color: "#9AA49D", fontSize: 12.5, fontWeight: 500, padding: "6px 0" }}>
+                      <Flag size={15} strokeWidth={2} /> Report
+                    </button>
+                  )}
+                  {user?.isAdmin && (
+                    <button onClick={() => removePost(p)} aria-label="Delete this post" title="Delete (admin)"
+                      style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", cursor: "pointer", color: "#B54A32", fontSize: 12.5, fontWeight: 500, padding: "6px 0" }}>
+                      <Trash2 size={15} strokeWidth={2} /> Delete
+                    </button>
+                  )}
+                </div>
               </div>
 
               {open && (
@@ -443,6 +506,18 @@ export default function App() {
                       <button className="hh-name" onClick={() => openProfile(cm.name)}
                         style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 12.5, fontWeight: 600, color: "#1E2823" }}>{cm.name}</button>
                       <span style={{ fontSize: 11.5, color: "#9AA49D", marginLeft: 6 }}>{ago(cm.ts)}</span>
+                      {user && cm.name !== user.name && (
+                        <button onClick={() => openReport({ commentId: cm.id, label: "comment" })} aria-label="Report this comment"
+                          style={{ background: "none", border: "none", padding: 0, marginLeft: 8, cursor: "pointer", fontSize: 11.5, color: "#9AA49D" }}>
+                          Report
+                        </button>
+                      )}
+                      {user?.isAdmin && (
+                        <button onClick={() => removeComment(cm)} aria-label="Delete this comment"
+                          style={{ background: "none", border: "none", padding: 0, marginLeft: 8, cursor: "pointer", fontSize: 11.5, color: "#B54A32" }}>
+                          Delete
+                        </button>
+                      )}
                       <p style={{ fontSize: 13.5, margin: "2px 0 0", color: "#3A4540", lineHeight: 1.45 }}>{cm.text}</p>
                     </div>
                   ))}
@@ -530,6 +605,46 @@ export default function App() {
               Posts, photos, comments, and profiles are public to everyone on this site.
             </p>
           </div>
+        </div>
+      )}
+
+      {/* Report dialog */}
+      {reporting && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(20,28,24,.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 55, padding: 16 }}
+          onClick={() => !reportBusy && setReporting(null)}>
+          <div role="dialog" aria-label={`Report this ${reporting.label}`} onClick={(e) => e.stopPropagation()}
+            style={{ background: "#FFFFFF", width: "100%", maxWidth: 400, borderRadius: 14, padding: 20 }}>
+            <h2 style={{ fontFamily: "'Fraunces', serif", fontSize: 19, margin: "0 0 4px" }}>Report this {reporting.label}</h2>
+            <p style={{ fontSize: 13, color: "#6B776F", margin: "0 0 12px" }}>What's wrong with it? Reports are only seen by moderators.</p>
+            <div style={{ display: "grid", gap: 6 }}>
+              {REPORT_REASONS.map((r) => (
+                <label key={r} style={{ display: "flex", alignItems: "center", gap: 8, border: "1px solid " + (reportReason === r ? "#1E3A2F" : "#CBD3CC"), background: reportReason === r ? "#F2F4F1" : "#FAFBFA", borderRadius: 9, padding: "9px 12px", fontSize: 13.5, cursor: "pointer" }}>
+                  <input type="radio" name="report-reason" value={r} checked={reportReason === r} onChange={() => setReportReason(r)} />
+                  {r}
+                </label>
+              ))}
+            </div>
+
+            {reportError && <p style={{ color: "#B54A32", fontSize: 13, margin: "10px 0 0" }}>{reportError}</p>}
+
+            <div style={{ marginTop: 14 }}>
+              <button onClick={submitReport} disabled={reportBusy || !reportReason}
+                style={{ width: "100%", background: "#1E3A2F", color: "#F2F4F1", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 14, fontWeight: 600, cursor: "pointer", opacity: reportBusy || !reportReason ? 0.5 : 1 }}>
+                {reportBusy ? "Sending…" : "Send report"}
+              </button>
+              <button onClick={() => setReporting(null)} disabled={reportBusy}
+                style={{ display: "block", margin: "10px auto 0", background: "none", border: "none", cursor: "pointer", color: "#6B776F", fontSize: 13, fontWeight: 600, padding: 0 }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Notice */}
+      {notice && (
+        <div role="status" style={{ position: "fixed", left: "50%", bottom: 90, transform: "translateX(-50%)", background: "#1E3A2F", color: "#F2F4F1", borderRadius: 999, padding: "10px 18px", fontSize: 13.5, fontWeight: 500, boxShadow: "0 6px 20px rgba(30,58,47,.25)", zIndex: 70, maxWidth: "calc(100% - 32px)" }}>
+          {notice}
         </div>
       )}
 
